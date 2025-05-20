@@ -1,0 +1,184 @@
+---
+title: "data preparation 2010"
+format: html
+editor: visual
+---
+
+```{r, eval = FALSE}
+library(arrow)
+library(tidyverse)
+library(gt)
+```
+
+```{r, eval = FALSE}
+#ce sont tous les apprentis en 2010
+apprentis_2010 <- open_dataset(sources ="//casd.fr/casdfs/Projets/ENSAE05/Data/DADS_Panel tous salariés_2021/Parquet" )|>
+                  filter(cs2 %in% c("71", "72")  & an %in%  c(2010) & filtre == 1) 
+                 
+# ce sont tous les apprentis en 2011
+
+apprentis_2011 <- open_dataset(sources ="//casd.fr/casdfs/Projets/ENSAE05/Data/DADS_Panel tous salariés_2021/Parquet" )|>
+                  filter(cs2 %in% c("71", "72") & an %in%  c(2011)) 
+  
+# identifier ceux qui sont 2010 et ne sont pas en 2011  
+  
+apprentis_2010_final<- apprentis_2010 %>% 
+                      anti_join(apprentis_2011, by= "nninouv") %>% 
+                      collect() %>%
+    filter(!dept %in% c('971', '972', '973', '974', '977', '978')) #enlève les apprentis dans les dom tom
+```
+
+```{r,eval = FALSE}
+# suivi des apprentis de 2010 10 ans plus tard
+suivi_apprentis_2010_final <-open_dataset(sources ="//casd.fr/casdfs/Projets/ENSAE05/Data/DADS_Panel tous salariés_2021/Parquet" ) %>%
+                              filter(an %in% 2010:2020) %>% 
+                          filter(nninouv %in% c(apprentis_2010_final$nninouv)) %>%
+                          collect() 
+   
+```
+
+### **Identification de "l'entreprise d'apprentissage"**
+
+```{r, eval = FALSE}
+sir_app_2010 <- suivi_apprentis_2010_final %>% 
+  filter(an %in% c(2010)) %>%
+  filter(cs2 %in% c("71", "72")) %>% #prend que les contrats d'apprentissage
+  select(nninouv, sir, debremu, finremu, nbheur) %>%
+  group_by(nninouv)%>%
+  filter(debremu == max(debremu)) %>%
+  filter(finremu == max(finremu)) %>%
+  filter(nbheur == max(nbheur)) %>%
+  ungroup() %>%
+  select(nninouv, sir) %>%
+  rename(sir_app = sir)
+
+
+```
+
+```{r, eval = FALSE}
+#rajoute une colonne avec le sir de l'entreprise dans laquelle l'apprentissage a ete effectue
+suivi_apprentis_2010_sir_app <- left_join(suivi_apprentis_2010_final, sir_app_2010, by = "nninouv")
+```
+
+### creation de variables relatives a la mobilite
+
+```{r, eval = FALSE}
+#on regarde si l'individu est encore dans son entreprise d'apprentissage en 2005
+stay_or_go_2011_3 <- suivi_apprentis_2010_sir_app %>%
+  filter(an %in% c(2011)) %>%
+  group_by(nninouv)%>% #groupe les observations par individu
+  mutate(stay_2011_bin = ifelse(all(is.na(netnetr)), 10,  ifelse(sir_app %in% c(sir), 0 , 1))) %>% #ici considere que reste si au moins un des sir est le sir d'apprentissage
+  ungroup()
+
+#0 si est encore dans l'entreprise en 2011, 1 sinon
+```
+
+```{r, eval = FALSE}
+#on etend cette variable a toutes les observations d'un individu
+stay_or_go_2011_4 <-stay_or_go_2011_3 %>%
+  dplyr::select(nninouv,stay_2011_bin)%>%
+  distinct() #ne garde qu'une ligne par nninouv, pas pb car a de attribue meme valeur par nninouv
+suivi_apprentis_2011_stay_go_2 <- left_join(suivi_apprentis_2010_sir_app, stay_or_go_2011_4, by = "nninouv")
+```
+
+```{r, eval = FALSE}
+#On regarde si l'individu est encore dans son entreprise en 2014 (il doit aussi y etre reste en 2011)
+stay_or_go_2014_22 <- suivi_apprentis_2011_stay_go_2 %>%
+  filter(an %in% c(2014)) %>%
+  group_by(nninouv) %>%
+  mutate(stay_2014_bin = ifelse( stay_2011_bin == 10, 10, ifelse(all(is.na(netnetr)), 100, ifelse(  stay_2011_bin == 0 & sir_app %in% c(sir), 0, 1)))) #ici considere que reste si au moins un des sir est le sir d'apprentissage
+
+
+
+#0 si est reste, 1 si est parti
+```
+
+```{r, eval = FALSE}
+#On etend la variable a toutes les observations d'un meme individu
+stay_or_go_2014_23 <-stay_or_go_2014_22 %>%
+  dplyr::select(nninouv,stay_2011_bin, stay_2014_bin)%>%
+  distinct() #ne garde qu'une ligne par nninouv, pas pb car a deja attribue mzªme valeur par nninouv
+suivi_apprentis_2014_stay_go_21 <- left_join(suivi_apprentis_2010_sir_app, stay_or_go_2014_23, by = "nninouv")
+```
+
+```{r, eval = FALSE}
+
+test_2014 <-suivi_apprentis_2014_stay_go_21 #%>%
+#  dplyr::select(stay_2005_bin, stay_2008_bin, nninouv, age, an)
+
+#On cree une variable statut de mobilite : 0 si est reste au moins jusqu'en 2014, 1 si est parti entre 2011 et 2014, 2 si est parti immediatement, 3 si absence de donnees en 2011 (a priori principalement chomage ou retour en formation scolaire)
+test_2014 <- test_2014 %>% 
+  mutate(stay_go = ifelse( stay_2011_bin == 10 , 3, if_else(stay_2014_bin==100 & stay_2011_bin == 0, 1, ifelse(stay_2014_bin ==100 & stay_2011_bin == 1, 2, stay_2011_bin + stay_2014_bin))),
+         stay_go= ifelse(is.na(stay_go) & !is.na(stay_2014_bin), 3, stay_go)) %>%
+  filter(an %in% c(2010)) #%>%
+#  dplyr::select(stay_go, age)
+
+#on transforme la variable en facteur
+test_2014$stay_go <- factor(test_2014$stay_go)
+```
+
+### preparation des bases pour la mobilité
+
+```{r, eval = FALSE}
+#preparation de la base pour la modelistaion
+
+base_2010<- test_2014 %>% 
+  mutate(#cat=as.factor(cat),
+         #sx= as.factor(sx),
+         commune=as.factor(ifelse(comr==comt,1,0)),
+         region=as.factor(ifelse(regr==regt,1,0)),
+        departement=as.factor(ifelse(depr==dept,1,0)),
+          #regt=as.factor(regt),
+         #ce=as.factor(ce),
+         #sect=as.factor(sect),
+         #nes5=as.factor(nes5),
+         #statut=as.factor(statut),
+        age2= age*age)
+```
+
+```{r, eval = FALSE}
+#version plus synthetique de a38
+base_2010 <- base_2010 %>%
+  mutate (A17 = case_when(
+    a38 %in% c('BZ', 'CB', 'CC', 'CD', 'CE',  'CF', 'CG', 'CH', 'CI', 'CJ', 'CK', 'CL', 'CM', 'DZ', 'EZ')~ 'BE' , 
+    a38 %in% c('JA', 'JB', 'JC') ~ 'JZ', 
+    a38 %in% c('MB', 'MC') ~ 'MZ' , 
+    a38 %in% c('OZ','PZ') ~ 'OP', 
+    a38 %in% c('QA', 'QB')~'QZ', 
+    TRUE ~ "abc")) %>%
+  mutate(A17 = if_else(A17 == "abc", a38, A17))
+```
+
+```{r, eval = FALSE}
+base_2010_2010 <- base_2010 %>% 
+   filter(nnifict != '1') %>%
+  filter(age %in% 15:29)
+#on enleve les id individu fictifs
+ 
+```
+
+```{r, eval = FALSE}
+#on regarde le nombre de NaN
+library(naniar)
+
+gg_miss_var(base_2010_2010 %>% 
+  select(age ,age2 , netnetr ,dp , xp , nbheur , nbsa_ent ,  nbsa_et, nes5,sx  , cat , sect,ce, statut,av ,avr,commune ,  region ,regt, departement, entsir, ancsir, tain, cs1, msb_ent, a38))
+
+```
+
+```{r, eval = FALSE}
+library(dplyr)
+library(haven)
+dat_2010<-base_2010_2010
+write_dta(dat_2010, "base_2010_2010.dta")
+
+```
+
+```{r, eval = FALSE}
+library(dplyr)
+library(haven)
+suivi_apprentis_2014_stay_go_21 <- suivi_apprentis_2014_stay_go_21 %>%
+  filter(nnifict == 0) 
+write_dta(suivi_apprentis_2014_stay_go_21, "base_suivi_2014.dta")
+
+```

@@ -1,0 +1,217 @@
+---
+title: "Salary trajectories 2010"
+format: html
+editor: visual
+---
+
+## Base
+
+```{r}
+library(haven)
+library(tidyverse)
+base_sal_2010 <- read_dta("base_suivi_2014.dta")
+
+ID<-base_sal_2010 %>% 
+  filter(an=="2010") %>% 
+  filter(age %in% 15:29) %>% 
+  select(nninouv)
+
+base_sal_2010<-base_sal_2010 %>% 
+  filter(nninouv %in% ID$nninouv)
+  
+```
+
+```{r}
+#base de suivi de la pop de 2004
+base_sal_2010<-base_sal_2010 %>% 
+  mutate(stay_go = ifelse( stay_2011_bin == 10 , 3, if_else(stay_2014_bin==100 & stay_2011_bin == 0, 1, ifelse(stay_2014_bin ==100 & stay_2011_bin == 1, 2, stay_2011_bin + stay_2014_bin))),
+         stay_go= ifelse(is.na(stay_go) & !is.na(stay_2014_bin), 3, stay_go)) %>%
+  filter(!is.na(stay_go))
+# seletionner les ID dde 2004
+
+ID<-base_sal_2010 %>% 
+  filter(an %in%c(2010)) %>% 
+  group_by(nninouv) %>% 
+  filter(debremu==max(debremu)) %>% 
+  filter(finremu==max(finremu)) %>% 
+  filter(nbheur== max(nbheur)) %>% 
+  ungroup() %>% 
+  select(nninouv)
+
+base_sal_2010<- base_sal_2010 %>% 
+  filter(nninouv %in% ID$nninouv)
+
+```
+
+stat desc
+
+si filtre =1 si est un post non annexxe
+
+indemnité chomage à partir 2008
+
+## exploration
+
+```{r}
+
+sal<-base_sal_2010%>% 
+  group_by(an) %>% 
+  filter( filtre ==1) %>%
+  ungroup() %>%
+  mutate(stay_go = as.factor(stay_go))
+
+sal$stay_go<- fct_recode(sal$stay_go, 
+                       "stay 3 years"="0", 
+                       "stay 1 year"="1",  
+                       "Leave immediately" ="2", 
+                       "Unemployed or studying"="3")
+```
+
+```{r}
+#en sommant tous les salaires par individu et par an et en ne gardant qu'une entrée par individu 
+sal <- sal %>%
+  group_by(nninouv, an) %>%
+  mutate(sal_tot = sum(netnetr)) %>%
+  mutate(nb_emploi_autre = n()-1) %>%
+  mutate(nb_emploi = nb_emploi_autre+ 1)%>%
+  mutate(nbheur_tot = sum(nbheur))%>%
+  mutate(dp_tot = sum(dp))%>%
+  ungroup()
+sal_unique <- sal %>%
+  group_by(nninouv, an) %>%
+  filter(netnetr == max(netnetr))%>%
+  ungroup()%>%
+  mutate(nbheur_autre = nbheur_tot- nbheur)%>%
+  mutate(pas_an_emploi = if_else(dp_tot < 360, 1, 0)) %>% #indique perte ou changement emploi
+  mutate(cumul_emploi = if_else(dp_tot > 360, 1, 0)) %>% #indique les cas ou on surs que plusieurs emplois en meme temps (potentiellement aussi des cas ou plusieurs emplois en meme temps mais pas travaille toute l'annee qui pas inclus ici)
+  mutate(changement_emploi = if_else(dp_tot <= 360 & nb_emploi_autre >= 1, 1, 0)) %>% #mais pb des temps partiels
+mutate(dp_reste = dp_tot-dp)
+
+
+pdf(file = 'salaires_desc_2010.pdf')
+ggplot(sal_unique %>% filter(!is.na(stay_go)), aes(x=an, y=log(sal_tot), color=factor(stay_go)))+
+       stat_summary(fun=mean , geom="line", size=1)+
+  labs(color="stay_go") +  theme (legend.position = "bottom", legend.direction = "horizontal") + ggtitle("Yearly total log salaries by mobility type")
+
+         
+ggplot(sal_unique %>% filter(!is.na(stay_go)), aes(x=an, y=nb_emploi, color=factor(stay_go)))+
+       stat_summary(fun=mean , geom="line", size=1)+
+  labs(color="stay_go") +  theme (legend.position = "bottom", legend.direction = "horizontal")+ ggtitle("Yearly number of jobs by mobility type")
+
+ggplot(sal_unique %>% filter(!is.na(stay_go)), aes(x=an, y=nbheur_tot, color=factor(stay_go)))+
+       stat_summary(fun=mean , geom="line", size=1)+
+  labs(color="stay_go") +  theme (legend.position = "bottom", legend.direction = "horizontal")+ ggtitle("Yearly total number of hours by mobility type")
+
+ggplot(sal_unique %>% filter(!is.na(stay_go)), aes(x=an, y=dp_tot, color=factor(stay_go)))+
+       stat_summary(fun=mean , geom="line", size=1)+
+  labs(color="stay_go") +  theme (legend.position = "bottom", legend.direction = "horizontal")+ ggtitle("Yearly number of pay days by mobility type")
+
+ggplot(sal_unique %>% filter(!is.na(stay_go)), aes(x=an, y=pas_an_emploi, color=factor(stay_go)))+
+       stat_summary(fun=mean , geom="line", size=1)+
+  labs(color="stay_go") +  theme (legend.position = "bottom", legend.direction = "horizontal")+ ggtitle("Percentage not working the full year by mobility type")
+
+
+ggplot(sal_unique %>% filter(!is.na(stay_go)), aes(x=an, y=cumul_emploi, color=factor(stay_go)))+
+       stat_summary(fun=mean , geom="line", size=1)+
+  labs(color="stay_go") +  theme (legend.position = "bottom", legend.direction = "horizontal")+ ggtitle("Percentage working multiple jobs by mobility type")
+dev.off()
+```
+
+0 "stay 3 years" 1 "stay 1 year" 2 "go" 3"Unemployed",
+
+# Modelisation avec lmer
+
+```{r}
+library(lme4)
+library(lmerTest)
+```
+
+```{r}
+
+sal_2 <- sal_unique %>%
+  filter(sal_tot >= 100)
+
+sal_2<- sal_2 %>% 
+  mutate(cat=as.factor(cat),
+         sx= as.factor(sx),
+         commune=as.factor(ifelse(comr==comt,1,0)),
+         region=as.factor(ifelse(regr==regt,1,0)),
+        departement=as.factor(ifelse(depr==dept,1,0)),
+          regt=as.factor(regt),
+         ce=as.factor(ce),
+         sect=as.factor(sect),
+         nes5=as.factor(nes5),
+         statut=as.factor(statut),
+        age2= age*age,
+        an = as.factor(an),
+        nb_emploi_autre=as.factor(ifelse(as.character(nb_emploi_autre) %in% c("0", "1","2","3"),as.character(nb_emploi_autre),"4 and more")),
+        nb_emploi_autre = as.factor(nb_emploi_autre)) 
+
+sal_2 <- sal_2 %>%
+  mutate (A17 = case_when(
+    a38 %in% c('BZ', 'CB', 'CC', 'CD', 'CE',  'CF', 'CG', 'CH', 'CI', 'CJ', 'CK', 'CL', 'CM', 'DZ', 'EZ')~ 'BE' , 
+    a38 %in% c('JA', 'JB', 'JC') ~ 'JZ', 
+    a38 %in% c('MB', 'MC') ~ 'MZ' , 
+    a38 %in% c('OZ','PZ') ~ 'OP', 
+    a38 %in% c('QA', 'QB')~'QZ', 
+    TRUE ~ "abc")) %>%
+  mutate(A17 = if_else(A17 == "abc", a38, A17))
+
+
+```
+
+```{r}
+model2<-lmer(log(sal_tot)~an:stay_go + an+  age + age2 + dp + dp_reste + pas_an_emploi + cumul_emploi+ xp + nbheur + nbheur_autre + nbsa_ent + nes5 + sx + sect + ce + commune + region + cat + tain + regt +departement + A17 + nb_emploi_autre +(1|nninouv), data=sal_2, REML = FALSE) 
+
+table(sal_2$stay_go)
+```
+
+## significativite des coefficients
+
+```{r}
+summary(model2)
+```
+
+## normalite des residus
+
+```{r}
+pdf(file = "qq_salary_2010.pdf")
+qqnorm(residuals(model2))
+qqline(residuals(model2))
+dev.off()
+```
+
+## sortir des coef
+
+```{r}
+coefs<- summary(model2)$coefficients
+
+effets<- as.data.frame(coefs)
+effets$var<-rownames(effets)
+
+effets_inter<-effets %>% 
+  filter(grepl("^an\\d{4}:stay_go",var))
+
+
+effets_inter_clean<-effets_inter %>% 
+  mutate(year=str_extract(var, "\\d{4}"), 
+         group=str_remove(var, "an\\d{4}:stay_go"))
+
+
+
+
+pdf(file = 'salary_trajectory_2010_coefs.pdf')
+ggplot(effets_inter_clean, aes(x=as.numeric(year), y=Estimate, color=group))+
+  geom_line(size=1.2)+
+  geom_point(size=3)+
+  geom_errorbar(aes(ymin=Estimate-1.96*`Std. Error`,
+                    ymax=Estimate+1.96*`Std. Error`))+
+  labs(
+    
+    x="year",
+    y="Estimated effect (log(wage))",
+    color="Decision"
+  )+
+  theme_minimal()  +  theme (legend.position = "bottom", legend.direction = "horizontal")
+  
+dev.off()
+```

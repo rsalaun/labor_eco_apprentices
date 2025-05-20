@@ -1,0 +1,184 @@
+---
+title: "data preparation 2004"
+format: html
+editor: visual
+---
+
+```{r}
+library(arrow)
+library(tidyverse)
+library(gt)
+```
+
+```{r}
+#ce sont tous les apprentis en 2004
+apprentis_2004 <- open_dataset(sources ="//casd.fr/casdfs/Projets/ENSAE05/Data/DADS_Panel tous salari?s_2021/Parquet" )|>
+                  filter(cs2 %in% c("71", "72") & an %in%  c(2004) & age %in% 15:29 & filtre == "1") 
+                 
+# ce sont tous les apprentis en 2005
+
+apprentis_2005 <- open_dataset(sources ="//casd.fr/casdfs/Projets/ENSAE05/Data/DADS_Panel tous salari?s_2021/Parquet" )|>
+                  filter(cs2 %in% c("71", "72") & an %in%  c(2005)) 
+  
+# identifier ceux qui sont 2004 et ne sont pas en 2005  
+  
+apprentis_2004_final<- apprentis_2004 %>% 
+                      anti_join(apprentis_2005, by= "nninouv") %>% 
+                      collect() %>%
+    filter(!dept %in% c('971', '972', '973', '974', '977', '978') & age %in% 15:29) #enlève les apprentis dans les dom tom
+```
+
+```{r}
+# suivi des apprentis de 2004 10 ans plus tard
+suivi_apprentis_2004_final <-open_dataset(sources ="//casd.fr/casdfs/Projets/ENSAE05/Data/DADS_Panel tous salari?s_2021/Parquet" ) %>%
+                              filter(an %in% 2004:2014) %>% 
+                          filter(nninouv %in% c(apprentis_2004_final$nninouv)) %>%
+                          collect() 
+   
+```
+
+### **Identification de "l'entreprise d'apprentissage"**
+
+```{r}
+sir_app_2004 <- suivi_apprentis_2004_final %>% 
+  filter(an %in% c(2004)) %>%
+  filter(cs2 %in% c("71", "72")) %>% #prend que les contrats d'apprentissage
+  select(nninouv, sir, debremu, finremu, nbheur) %>%
+  group_by(nninouv)%>%
+  filter(debremu == max(debremu)) %>%
+  filter(finremu == max(finremu)) %>%
+  filter(nbheur == max(nbheur)) %>%
+  ungroup() %>%
+  select(nninouv, sir) %>%
+  rename(sir_app = sir)
+
+
+```
+
+```{r}
+#rajoute une colonne avec le sir de l'entreprise dans laquelle l'apprentissage a ete effectue
+suivi_apprentis_2004_sir_app <- left_join(suivi_apprentis_2004_final, sir_app_2004, by = "nninouv")
+```
+
+### creation de variables relatives a la mobilite
+
+```{r}
+#on regarde si l'individu est encore dans son entreprise d'apprentissage en 2005
+stay_or_go_2005_3 <- suivi_apprentis_2004_sir_app %>%
+  filter(an %in% c(2005)) %>%
+  group_by(nninouv)%>% #groupe les observations par individu
+  mutate(stay_2005_bin = if_else(sir_app %in% c(sir), 0 , 1)) %>% #ici considere que reste si au moins un des sir est le sir d'apprentissage
+  ungroup()
+
+#0 si est encore dans l'entreprise en 2005, 1 sinon
+```
+
+```{r}
+#on etend cette variable a toutes les observations d'un individu
+stay_or_go_2005_4 <-stay_or_go_2005_3 %>%
+  dplyr::select(nninouv,stay_2005_bin)%>%
+  distinct() #ne garde qu'une ligne par nninouv, pas pb car a de attribue meme valeur par nninouv
+suivi_apprentis_2005_stay_go_2 <- left_join(suivi_apprentis_2004_sir_app, stay_or_go_2005_4, by = "nninouv")
+```
+
+```{r}
+#On regarde si l'individu est encore dans son entreprise en 2008 (il doit aussi y etre reste en 2005)
+stay_or_go_2008_22 <- suivi_apprentis_2005_stay_go_2 %>%
+  filter(an %in% c(2008)) %>%
+  group_by(nninouv) %>%
+  mutate(stay_2008_bin = if_else(stay_2005_bin == 0 & sir_app %in% c(sir), 0, 1)) #ici considere que reste si au moins un des sir est le sir d'apprentissage
+
+#ici on en trouve 2865 
+
+
+#0 si est reste, 1 si est parti
+```
+
+```{r}
+#On etend la variable a toutes les observations d'un meme individu
+stay_or_go_2008_23 <-stay_or_go_2008_22 %>%
+  dplyr::select(nninouv,stay_2005_bin, stay_2008_bin)%>%
+  distinct() #ne garde qu'une ligne par nninouv, pas pb car a deja attribue mzªme valeur par nninouv
+suivi_apprentis_2008_stay_go_21 <- left_join(suivi_apprentis_2004_sir_app, stay_or_go_2008_23, by = "nninouv")
+```
+
+```{r}
+
+test_2008 <-suivi_apprentis_2008_stay_go_21 #%>%
+#  dplyr::select(stay_2005_bin, stay_2008_bin, nninouv, age, an)
+
+#On cree une variable statut de mobilite : 0 si est reste au moins jusqu'en 2008, 1 si est parti entre 2005 et 2008, 2 si est parti immediatement, 3 si absence de donnees en 2005 (a priori principalement chomage ou retour en formation scolaire)
+test_2008 <- test_2008 %>% 
+  mutate(stay_go = stay_2005_bin + stay_2008_bin,
+         stay_go= ifelse(is.na(stay_go) & !is.na(stay_2008_bin), 3, stay_go))  %>%
+  filter(an %in% c(2004)) #%>%
+#  dplyr::select(stay_go, age)
+
+#on transforme la variable en facteur
+test_2008$stay_go <- factor(test_2008$stay_go)
+```
+
+### preparation des bases pour la mobilité
+
+```{r}
+#preparation de la base pour la modelistaion
+
+base_2004<- test_2008 %>% 
+  mutate(cat=as.factor(cat),
+         #sx= as.factor(sx),
+         commune=as.factor(ifelse(comr==comt,1,0)),
+         region=as.factor(ifelse(regr==regt,1,0)),
+        departement=as.factor(ifelse(depr==dept,1,0)),
+          regt=as.factor(regt),
+         #ce=as.factor(ce),
+         #sect=as.factor(sect),
+       #  nes5=as.factor(nes5),
+         statut=as.factor(statut),
+        age2= age*age)
+```
+
+```{r}
+#version plus synthetique de a38
+base_2004 <- base_2004 %>%
+  mutate (A17 = case_when(
+    a38 %in% c('BZ', 'CB', 'CC', 'CD', 'CE',  'CF', 'CG', 'CH', 'CI', 'CJ', 'CK', 'CL', 'CM', 'DZ', 'EZ')~ 'BE' , 
+    a38 %in% c('JA', 'JB', 'JC') ~ 'JZ', 
+    a38 %in% c('MB', 'MC') ~ 'MZ' , 
+    a38 %in% c('OZ','PZ') ~ 'OP', 
+    a38 %in% c('QA', 'QB')~'QZ', 
+    TRUE ~ "abc")) %>%
+  mutate(A17 = if_else(A17 == "abc", a38, A17))
+```
+
+```{r}
+base_2004_2004 <- base_2004 %>% 
+   filter(nnifict != '1') %>%
+  filter(age %in% 15:29)
+#on enleve les id individu fictifs
+ 
+```
+
+```{r,eval = FALSE}
+#on regarde le nombre de NaN
+library(naniar)
+
+gg_miss_var(base_2004_2004 %>% 
+  select(age ,age2 , netnetr ,dp , xp , nbheur , nbsa_ent ,  nbsa_et, nes5,sx  , cat , sect,ce, statut,av ,avr,commune ,  region ,regt, departement, entsir, ancsir, tain, cs1, msb_ent, a38))
+
+```
+
+```{r}
+
+dat<-base_2004_2004 
+write_dta(dat, "base_2004_2.dta")
+write_dta(dat, "base_2004_2004.dta")
+#%>% 
+#  select(nninouv,stay_go ,age ,age2, netnetr ,dp , xp , nbheur , nbsa_ent , nes5,sx   , sect,ce, statut,av ,avr,commune ,  region ,regt, departement, a38, entsir, cs1,cs2, sir, sir_app, tain, msb_ent, nninouv, dept, depr )
+```
+
+```{r}
+suivi_apprentis_2008_stay_go_21 <- suivi_apprentis_2008_stay_go_21 %>%
+  filter(nnifict == 0) 
+write_dta(suivi_apprentis_2008_stay_go_21, "base_suivi_2008.dta")
+
+```

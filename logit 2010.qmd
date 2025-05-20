@@ -1,0 +1,530 @@
+---
+title: "Logit  models cohort 2010"
+format: html
+editor: visual
+---
+
+### Data preparation
+
+```{r}
+library(tidyverse)
+library(haven)
+base_2010_2 <- read_dta("base_2010_2010.dta")
+```
+
+```{r}
+library(nnet)
+library(gtsummary)
+
+
+
+```
+
+```{r}
+base_2010_2 <- base_2010_2 %>%
+  mutate(cat = as.factor(cat))
+
+
+```
+
+```{r}
+base_2010_22 <- base_2010_2 %>%
+  group_by(nninouv) %>%
+  mutate(sal_tot = sum(netnetr)) %>%
+  mutate(nb_emploi_autre = n()-1) %>%
+  mutate(nbheur_tot = sum(nbheur))%>%
+  mutate(dp_tot = sum(dp))%>%
+  ungroup() %>%
+  mutate(nbheur_autre = nbheur_tot- nbheur)%>%
+  mutate(pas_an_emploi = if_else(dp_tot < 360, 1, 0)) %>% #indique perte ou changement emploi
+  mutate(cumul_emploi = if_else(dp_tot > 360, 1, 0)) %>% #indique les cas ou on surs que plusieurs emplois en meme temps (potentiellement aussi des cas ou plusieurs emplois en meme temps mais pas travaille toute l'annee qui pas inclus ici) 
+  mutate(changement_emploi = if_else(dp_tot <= 360 & nb_emploi_autre >= 1, 1, 0)) %>%
+  mutate(nb_emploi_autre = as.factor(nb_emploi_autre)) %>%
+  filter(sir == sir_app) %>%
+  mutate(sal_autre = sal_tot - netnetr)
+
+
+```
+
+### First attempt with multinom
+
+```{r}
+model<-multinom(stay_go~ age +age2 + netnetr + sal_autre + nb_emploi_autre + dp + xp + nbheur + nbsa_ent + nes5+sx  + cat + sect+ce+ statut+av +avr+commune +  region +regt+departement+ entsir + tain + cs1 + msb_ent + a38,   data=base_2010_22, maxit = 1000)
+```
+
+```{r}
+library(broom)
+tidy(model, exponentiate = TRUE)
+```
+
+```{r}
+pred.probs <- as_tibble(predict(model, type="probs")) %>%
+  mutate(obs_num = 1:n())
+```
+
+```{r}
+residuals <- as_tibble(residuals(model)) %>%
+  setNames(paste('resid.', names(.), sep="")) %>%
+  mutate(obs_num = 1:n())
+
+```
+
+```{r}
+mean(abs(residuals$resid.1))
+mean(abs(residuals$resid.2))
+mean(abs(residuals$resid.3))
+mean(abs(residuals$resid.4))
+
+```
+
+### **Export vers stata**
+
+```{r}
+library(dplyr)
+library(haven)
+d<-base_2004_2 %>% 
+  select(nninouv,stay_go ,age ,age2, netnetr ,dp , xp , nbheur , nbsa_ent , nes5,sx   , sect,ce, statut,av ,avr,commune ,  region ,regt, departement, a38, entsir, cs1,cs2 )
+write_dta(d, "base_2004_2.dta")
+```
+
+\`
+
+# Nested logit
+
+on fait ceci car iia n'est pas verifi?
+
+Ne pas oublier de prendre ne compte que les appprentisaage de 2004
+
+ne pas oublier de filtrer salaire principal pour eviter ceux qui ont n emplois
+
+## Chargement de la base de travail de la cohorte 2004
+
+```{r}
+library(tidyverse)
+library(forcats)
+library(nestedLogit)
+library(data.table)
+library(nestedLogit)
+library(pROC)
+library(ResourceSelection)
+```
+
+```{r}
+#selection des variables pertinentes pour nos analyses au seins de cette cohorte
+d <- base_2010_22  %>%
+  select(cs2, nninouv ,age, age2, netnetr, dp, xp, nbheur , nbsa_ent ,nes5,sx   , sect,ce, statut,av ,avr,commune , cat, region ,regt,departement,dept,depr, entsir , tain , cs1 , msb_ent , a38,stay_go, sal_autre, A17, nb_emploi_autre,filtre) %>%
+  mutate(tain = as.factor(tain),
+         cs1 = as.factor(cs1),
+         a38 = as.factor(a38),
+         ce=as.factor(ce),
+         nes5=as.factor(nes5),
+         sal_autre=ifelse(is.na(sal_autre),0,sal_autre),
+         cat=as.factor(ifelse(cat=="P","Private", "Public"))
+         ) %>% 
+  filter(nes5!="" ) %>% 
+  mutate(nes5=droplevels(nes5)) %>%
+  filter(!cs1 %in% c("2")) %>% 
+  mutate(cs1=droplevels(cs1)) %>%
+   filter(!ce %in% c("D")) %>% 
+  mutate(ce=droplevels(ce)) %>%
+  filter(!tain %in% c("", "00")) %>% 
+  mutate(tain=droplevels(tain)) %>%
+  filter(!nb_emploi_autre %in% c("8", "10","6") ) %>% 
+  mutate(nb_emploi_autre=droplevels(nb_emploi_autre)) %>% 
+  filter( filtre ==1) %>% # pour retenir l'emploi principal
+ filter(cs2 %in% c("71", "72")) %>%  # garder les apprentis uniquement
+filter(!dept %in% c( "971", "972", "973", "974")) %>% # fors DOM- TOM
+  mutate(nb_emploi_autre=as.factor(ifelse(as.character(nb_emploi_autre) %in% c("0", "1","2","3"),as.character(nb_emploi_autre),"4")))
+
+d$stay_go<- as.factor(d$stay_go) 
+d$stay_go <- fct_recode(d$stay_go, 
+                       "stay 3 years"="1", 
+                       "stay 1 year"="2",  
+                       "Leave immediately" ="3", 
+                       "Unemployed or studying"="4")
+```
+
+```{r}
+table(d$stay_go)
+```
+
+Distribution de la variable cible
+
+```{r}
+
+table(d$stay_go, useNA = "ifany")
+ggplot(d  , aes(x=stay_go))+
+  geom_bar(fill="blue", color="white", width = 1)+
+  labs(title="Distribution of apprentices: stay or go after intership",
+       x="Decision")+
+  theme_minimal(base_size=14)
+```
+
+```{r}
+library(naniar)
+gg_miss_var(d)
+
+
+
+```
+
+## **modelisation**
+
+```{r}
+
+d<-d %>% filter(!is.na(stay_go)) %>% 
+  mutate(type=ifelse(stay_go %in%c(0,1),0,1),
+                stay=ifelse(type==1, NA,
+                            ifelse(stay_go==0,0,1)),
+                go=ifelse(type==0, NA,
+                            ifelse(stay_go==2,2,3))
+              
+                )
+
+
+#petite correction apres model
+d<-d %>% filter(tain!="00") %>%
+  mutate(count=ifelse(nbheur>=2000,1,0)) %>% 
+  filter(count==0)
+  
+
+
+
+comparisons<-logits(type=dichotomy(c("stay 3 years","stay 1 year"), go=c("Leave immediately" ,  "Unemployed or studying")),
+                    rester=dichotomy("stay 3 years","stay 1 year"),
+                    partir=dichotomy("Leave immediately" , 
+                       "Unemployed or studying"))
+
+comparisons
+#Ajuster le mod?le logit embo?t? avec nestedLogit :+ sal_autre + nb_emploi_autre entsir nbheur nbsa_ent y revenir cat
+model_nested <- nestedLogit(
+  stay_go ~ age +age2 +    xp   + nes5+sx + dp+ netnetr + sal_autre + nb_emploi_autre   + sect+ce +commune +  region +regt+departement + tain + cs1 + msb_ent + A17,
+  dichotomies = comparisons,
+  data = d 
+  )
+
+
+#model niveau 1
+
+#model_nest_1 <- models(model_nested,1)
+
+#model niveau 2
+
+#model_nest_2 <- models(model_nested,2)
+```
+
+```{r}
+# Etape 1 : Tests de significativit? globale(Wald et LRT)
+
+cat("\nTests de signifactivit? globale par dichotomie:\n")
+
+for (dich in names(model_nested$models)){
+  
+#Mod?le complet
+model <- model_nested$models[[dich]]
+logLik_full <- logLik(model)
+
+#mod?le r?duit (intercept)
+formula_reduced <- update(formula(model), .~1) 
+model_reduced <- glm(formula_reduced, family = binomial(link = "logit"), data = model$data)
+
+logLik_reduced <- logLik(model_reduced)
+
+#test du rapport de vraisemblance(LRT)
+lrt_stat <- -2*(as.numeric(logLik_reduced)-as.numeric(logLik_full))
+lrt_df <- length(coef(model))-1
+lrt_pvalue <- pchisq(lrt_stat, df = lrt_df, lower.tail = FALSE)
+
+cat("Test LRT-Statistique:", lrt_stat, "Degr?s de libert?:", lrt_df , "p-value:", lrt_pvalue, "\n")
+
+#Test de Wald
+
+coefs <- summary(model)$coefficients
+wald_stat <- (coefs[, "Estimate"]/coefs[, "Std. Error"])^2
+wald_pvalue <-pchisq(wald_stat, df=1, lower.tail = FALSE)
+cat("test de Wald par le pr?dicteur :\n")
+print(data.frame(Predictor = rownames(coefs), Wald_Stat = wald_stat, p_value = wald_pvalue))
+  
+}
+```
+
+c'es globalement significatif
+
+```{r}
+#Etape 2: Courbes de ROC et taux de bon classements
+
+
+#extraire proba pour chaque cat
+predictions <- predict(model_nested, newdata = d , type = "response")
+
+#calculer proba pour dicho
+#
+d$pred_nid1_vs_nid2 <- predictions[1]$p[,1] + predictions[1]$p[,2]
+#
+d$pred_nid1_0_vs_1 <- predictions[1]$p[,2]/(predictions[1]$p[,1] + predictions[1]$p[,2])
+#
+d$pred_nid2_2_vs_3 <- predictions[1]$p[,4]/(predictions[1]$p[,3] + predictions[1]$p[,4])
+
+#variables binaires
+d$obs_nid1_vs_nid2 <- d$stay_go %in% c("stay 3 years","stay 1 year")
+d$obs_nid1_0_vs_1 <- d$stay_go == "stay 1 year"
+d$obs_nid2_2_vs_3 <- d$stay_go == "Unemployed or studying"
+
+
+#filter
+data_nid1 <- d[d$stay_go %in% c("stay 3 years","stay 1 year"),]
+data_nid2 <- d[d$stay_go %in% c("Leave immediately",   "Unemployed or studying"),]
+
+#corubes ROC
+roc_nid1_vs_nid2 <- roc(d$obs_nid1_vs_nid2, d$pred_nid1_vs_nid2)
+roc_nid1_0_vs_1 <- roc(d$obs_nid1_0_vs_1, d$pred_nid1_0_vs_1)
+roc_nid2_2_vs_3 <- roc(d$obs_nid2_2_vs_3, d$pred_nid2_2_vs_3)
+
+pdf(file = 'roc_2010.pdf')
+specificity=roc_nid1_vs_nid2$specificities
+sensibility=roc_nid1_vs_nid2$sensitivities
+d_roc<-cbind.data.frame(specificity,sensibility)
+ggplot(d_roc, aes(x=1-specificity, y=sensibility))+
+  geom_line(color="blue", size=1.5)+
+  geom_abline(color="gray")+
+   labs(title="Stay VS Go")+
+  annotate("text", x=0.65,y=0.1,
+           label=paste("AUC=",round(auc(roc_nid1_vs_nid2),3) ),
+           size=5, color="black")+
+  theme_light(base_size=14)
+
+
+
+specificity=roc_nid1_0_vs_1$specificities
+sensibility=roc_nid1_0_vs_1$sensitivities
+d_roc<-cbind.data.frame(specificity,sensibility)
+ggplot(d_roc, aes(x=1-specificity, y=sensibility))+
+  geom_line(color="blue", size=1.5)+
+  geom_abline(color="gray")+
+   labs(title="stay 3 years VS stay 1 year")+
+  annotate("text", x=0.65,y=0.1,
+           label=paste("AUC=",round(auc(roc_nid1_0_vs_1),3) ),
+           size=5, color="black")+
+  theme_light(base_size=14)
+
+
+
+specificity=roc_nid2_2_vs_3$specificities
+sensibility=roc_nid2_2_vs_3$sensitivities
+d_roc<-cbind.data.frame(specificity,sensibility)
+ggplot(d_roc, aes(x=1-specificity, y=sensibility))+
+  geom_line(color="blue", size=1.5)+
+  geom_abline(color="gray")+
+   labs(title="go VS Unemployed")+
+  annotate("text", x=0.65,y=0.1,
+           label=paste("AUC=",round(auc(roc_nid2_2_vs_3),3) ),
+           size=5, color="black")+
+  theme_light(base_size=14)
+dev.off()
+
+
+
+#taux de bon classement
+threshold <- 0.5
+d$pred_class_nid1_vs_nid2 <- as.integer(d$pred_nid1_vs_nid2 > threshold)
+
+data_nid1$pred_class_nid1_0_vs_1 <- as.integer(data_nid1$pred_nid1_0_vs_1 > threshold)
+
+data_nid2$pred_class_nid2_2_vs_3 <- as.integer(data_nid2$pred_nid2_2_vs_3>threshold)
+
+accuracy_nid1_vs_nid2 <- mean(d$pred_class_nid1_vs_nid2==d$obs_nid1_vs_nid2)
+
+accuracy_nid1_0_vs_1 <- mean(data_nid1$pred_class_nid1_0_vs_1 == data_nid1$obs_nid1_0_vs_1)
+
+accuracy_nid2_2_vs_3 <- mean(data_nid2$pred_class_nid2_2_vs_3 == data_nid2$obs_nid2_2_vs_3)
+
+accuracy_nid1_vs_nid2
+accuracy_nid1_0_vs_1
+accuracy_nid2_2_vs_3
+```
+
+A peu pres
+
+## test d'adequation
+
+```{r,eval = FALSE}
+#etape 3: test d'ad?quation de Hosmer Lemeshow
+
+hoslem.test(d$obs_nid1_vs_nid2,d$pred_nid1_vs_nid2 )
+
+hoslem.test(data_nid1$obs_nid1_0_vs_1,data_nid1$pred_nid1_0_vs_1 )
+
+hoslem.test(data_nid2$obs_nid2_2_vs_3,data_nid2$pred_nid2_2_vs_3 )
+
+```
+
+## comparaison des crcaterisque dans le niveau 2: nid1
+
+N'oubli de comparer les caract?ritiques des indicudus dans le nID : il semblerait qu'ils soient pareils
+
+## affichage des results
+
+```{r}
+library(ggeffects)
+library(ggstats)
+library(broom.helpers)
+```
+
+### modele niveau 1
+
+```{r}
+summary(model_nested$models$type)
+```
+
+```{r}
+pdf(file = 'nested_stay_go_level_1_2010_coefs.pdf')
+ggcoef_model(model_nested$models$type, 
+             exponentiate=TRUE,
+             include=c("age", "age2", "netnetr","sal_autre", "nb_emploi_autre", "xp", "nes5","sx", "ce", "cs1","commune","region","departement","tain"),
+             colour=NULL)+
+  scale_y_discrete(
+    labels=c("netnetr"="Wage in constant euro",
+             "sal_autre"= "Wages from other jobs",
+             "dp"="Pay period in the year (days)",
+             "xp"="Professional experience Duration",
+             "sx0"="Female",
+            "sx1"="Male",
+            "ceD"="Home workers",
+            "ceP"="Part-time workers",
+            "ceC"= "Full-time workers",
+            "nb_emploi_autre"="Number of other Work",
+            "tain"="Compagny size range",
+            "nes5ES"="Agriculture",
+            "nes5ET"="Industry",
+            "nes5EU"="Construction",
+            "nes5EW"="Trading",
+            "nes5EX"="Services",
+            "cs13"="Cadres",
+            "cs14"="Intermediate professions",
+            "cs15"="Employees",
+            "cs16"="Factory workers",
+            "tain01" = "between 1 and 4 employees",
+            "tain02" = "between 5 and 9 employees",
+            "tain03" = "between 10 and 19 employees",
+            "tain04" = "between 20 and 49 employees",
+            "tain05" = "between 50 and 99 employees",
+            "tain06" = "between 100 and 199 employees",
+            "tain07" = "between 200 and 499 employees",
+            "tain08" = "between 500 and 999 employees",
+            "tain09" = "between 1000 and 1999 employees",
+            "tain10" = "between 2000 and 4999 employees",
+            "tain11" = "More than 5000 employees",
+            "commune" = "work and live in same city",
+            "departement" = "work and live in same departement",
+            "region" = "work and live in same region",
+            "nb_emploi_autre0" = "no other job",
+            "nb_emploi_autre1" = "one other job",
+            "nb_emploi_autre2" = "two other jobs",
+            "nb_emploi_autre3" = "three other jobs",
+            "nb_emploi_autre4" = "four or more other jobs",
+            "age2" = "age squared"
+            
+  ))
+
+dev.off()
+```
+
+### modele niveau 2: nid 2
+
+```{r}
+summary(model_nested$models$partir)
+
+```
+
+```{r}
+
+pdf(file = 'nested_stay_go_level_2_nid2_2010_coefs.pdf')
+ggcoef_model(model_nested$models$partir, 
+             exponentiate=TRUE,
+             include=c("age", "age2", "netnetr","sal_autre", "nb_emploi_autre", "xp","sx", "nes5","ce", "cs1","commune","region","departement"),
+             colour=NULL)+
+  scale_y_discrete(
+    labels=c("netnetr"="Wage in constant euro",
+             "sal_autre"= "Wages from other jobs",
+             "dp"="Pay period in the year (days)",
+             "xp"="Professional experience Duration",
+             "sx0"="Female",
+            "sx1"="Male",
+            "ceD"="Home workers",
+            "ceP"="Part-time workers",
+            "ceC"= "Full-time workers",
+            "nb_emploi_autre"="Number of other Work",
+            "tain"="Compagny size range",
+            "nes5ES"="Agriculture",
+            "nes5ET"="Industry",
+            "nes5EU"="Construction",
+            "nes5EW"="Trading",
+            "nes5EX"="Services",
+            "cs13"="Cadres",
+            "cs14"="Intermediate professions",
+            "cs15"="Employees",
+            "cs16"="Factory workers",
+            "tain01" = "between 1 and 4 employees",
+            "tain02" = "between 5 and 9 employees",
+            "tain03" = "between 10 and 19 employees",
+            "tain04" = "between 20 and 49 employees",
+            "tain05" = "between 50 and 99 employees",
+            "tain06" = "between 100 and 199 employees",
+            "tain07" = "between 200 and 499 employees",
+            "tain08" = "between 500 and 999 employees",
+            "tain09" = "between 1000 and 1999 employees",
+            "tain10" = "between 2000 and 4999 employees",
+            "tain11" = "More than 5000 employees",
+            "commune" = "work and live in same city",
+            "departement" = "work and live in same departement",
+            "region" = "work and live in same region",
+            "nb_emploi_autre0" = "no other job",
+            "nb_emploi_autre1" = "one other job",
+            "nb_emploi_autre2" = "two other jobs",
+            "nb_emploi_autre3" = "three other jobs",
+            "nb_emploi_autre4" = "four or more other jobs",
+            "age2" = "age squared"
+            
+  ))
+dev.off()
+```
+
+### modele niveau 2: nid 1
+
+ici, on d?crit juste
+
+```{r}
+
+table_1 <- d %>% 
+  filter(stay_go %in%c( "stay 3 years", "stay 1 year")) %>% 
+  group_by(stay_go) %>% 
+  summarise(
+    across(c(age, netnetr,sal_autre, dp, xp),
+           list(mean= ~mean(.x, na.rm=TRUE),
+                sd=  ~sd(.x, na.rm=TRUE)),
+           .names= "{.col}_{.fn}")
+  )
+write.csv(table_1, "table_1_level_2_nest_1_2010.csv")
+
+
+table_2 <- d %>% 
+  filter(stay_go %in%c( "stay 3 years", "stay 1 year")) %>% 
+  group_by(stay_go,sx) %>% 
+  select(sx) %>% 
+  summarise(
+    n=n(), .groups = "drop") %>% 
+  mutate(pourcentage=round(100*n/sum(n),2))
+write.csv(table_2, "table_2_level_2_nest_1_2010.csv")  
+
+
+table_3 <- d %>% 
+  filter(stay_go %in%c( "stay 3 years", "stay 1 year")) %>% 
+  group_by(stay_go,nes5) %>% 
+  summarise(
+    n=n(), .groups = "drop") %>% 
+  mutate(pourcentage=round(100*n/sum(n),2))
+write.csv(table_3, "table_3_level_2_nest_1_2010.csv")
+
+ 
+  
+```
